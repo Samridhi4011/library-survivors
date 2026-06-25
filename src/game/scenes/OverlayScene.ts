@@ -1,10 +1,12 @@
 import Phaser from "phaser";
 import { gameConfig } from "../data/gameConfig";
-import { GameEvents, type PauseChangedPayload } from "../types/events";
+import { GameEvents, type PauseChangedPayload, type RunEndedPayload } from "../types/events";
+import { formatRunTime } from "../utils/format";
 
 export class OverlayScene extends Phaser.Scene {
   private pauseGroup?: Phaser.GameObjects.Container;
   private levelPreviewGroup?: Phaser.GameObjects.Container;
+  private runEndedGroup?: Phaser.GameObjects.Container;
 
   public constructor() {
     super("OverlayScene");
@@ -16,6 +18,8 @@ export class OverlayScene extends Phaser.Scene {
 
     this.levelPreviewGroup = this.createMessagePanel("Level Up", "");
     this.levelPreviewGroup.setVisible(false);
+    this.runEndedGroup = this.createMessagePanel("", "");
+    this.runEndedGroup.setVisible(false);
 
     const gameScene = this.scene.get("GameScene");
     gameScene.events.on(GameEvents.PauseChanged, ({ isPaused }: PauseChangedPayload) => {
@@ -24,6 +28,18 @@ export class OverlayScene extends Phaser.Scene {
     gameScene.events.on(GameEvents.LevelUpPreview, () => {
       this.levelPreviewGroup?.setVisible(true);
       this.time.delayedCall(1400, () => this.levelPreviewGroup?.setVisible(false));
+    });
+    gameScene.events.on(GameEvents.RunEnded, ({ state }: RunEndedPayload) => {
+      this.runEndedGroup?.destroy();
+      this.runEndedGroup = this.createMessagePanel(
+        state.status === "won" ? "Library Restored" : "Chaos Reached 100%",
+        state.status === "won"
+          ? `${formatRunTime(state.elapsedSeconds)}  Chaos ${Math.round(state.chaosPercent)}%${
+              state.perfectVictory ? "  Perfect" : ""
+            }`
+          : `${formatRunTime(state.elapsedSeconds)}  Shelved ${state.totalShelvedBooks}`
+      );
+      this.runEndedGroup.setVisible(true);
     });
   }
 

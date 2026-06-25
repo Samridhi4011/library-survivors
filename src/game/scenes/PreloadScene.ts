@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { bookCategories, bookCategoryConfig, getBookTextureKey } from "../data/bookConfig";
 import { gameConfig } from "../data/gameConfig";
 
 export class PreloadScene extends Phaser.Scene {
@@ -19,6 +20,10 @@ export class PreloadScene extends Phaser.Scene {
   private createGeneratedTextures(): void {
     this.createCircleTexture("librarian", gameConfig.colors.player, 34, 0x0f172a);
     this.createShelfTexture();
+
+    for (const category of bookCategories) {
+      this.createBookTexture(getBookTextureKey(category), bookCategoryConfig[category].color);
+    }
   }
 
   private createCircleTexture(
@@ -56,6 +61,19 @@ export class PreloadScene extends Phaser.Scene {
     }
 
     graphics.generateTexture("shelf", 156, 44);
+    graphics.destroy();
+  }
+
+  private createBookTexture(key: string, fillColor: number): void {
+    const graphics = this.make.graphics({ x: 0, y: 0 });
+
+    graphics.fillStyle(fillColor, 1);
+    graphics.fillRoundedRect(0, 0, 22, 30, 3);
+    graphics.lineStyle(2, 0x0f172a, 1);
+    graphics.strokeRoundedRect(1, 1, 20, 28, 3);
+    graphics.lineStyle(1, 0xffffff, 0.65);
+    graphics.lineBetween(6, 6, 6, 24);
+    graphics.generateTexture(key, 22, 30);
     graphics.destroy();
   }
 }

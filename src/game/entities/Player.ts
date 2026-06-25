@@ -48,6 +48,14 @@ export class Player {
     return this.sprite;
   }
 
+  public get x(): number {
+    return this.sprite.x;
+  }
+
+  public get y(): number {
+    return this.sprite.y;
+  }
+
   private axis(
     negativeA: Phaser.Input.Keyboard.Key,
     negativeB: Phaser.Input.Keyboard.Key,
