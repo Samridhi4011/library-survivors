@@ -19,6 +19,7 @@ export class PreloadScene extends Phaser.Scene {
 
   private createGeneratedTextures(): void {
     this.createCircleTexture("librarian", gameConfig.colors.player, 34, 0x0f172a);
+    this.createCircleTexture("child", gameConfig.colors.child, 28, gameConfig.colors.childAccent);
     this.createShelfTexture();
 
     for (const category of bookCategories) {

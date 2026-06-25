@@ -21,6 +21,7 @@ export interface RunState {
   backpackCount: number;
   backpackCapacity: number;
   looseBookCount: number;
+  carriedBookCount: number;
   isPaused: boolean;
   status: RunStatus;
   perfectVictory: boolean;
@@ -53,6 +54,7 @@ export const createInitialRunState = (
   backpackCount: 0,
   backpackCapacity: 5,
   looseBookCount: 0,
+  carriedBookCount: 0,
   isPaused: false,
   status: "running",
   perfectVictory: false
@@ -136,10 +138,12 @@ export const addXp = (state: RunState, xpAmount: number): RunState => {
 export const setLooseBookPressure = (
   state: RunState,
   looseBookCount: number,
+  carriedBookCount: number,
   chaosGrowthRate: number
 ): RunState => ({
   ...state,
   looseBookCount,
+  carriedBookCount,
   chaosGrowthRate
 });
 

@@ -10,6 +10,7 @@ export class Player {
   public constructor(scene: Phaser.Scene, x: number, y: number) {
     this.sprite = scene.physics.add.sprite(x, y, "librarian");
     this.sprite.setCollideWorldBounds(true);
+    this.sprite.setCircle(15, 2, 2);
     this.sprite.setDamping(true);
     this.sprite.setDrag(0.94);
     this.sprite.setMaxVelocity(gameConfig.player.speed);

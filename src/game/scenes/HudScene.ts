@@ -33,7 +33,7 @@ export class HudScene extends Phaser.Scene {
     this.chaosText = this.add.text(190, 18, "Chaos 0%", this.textStyle(18));
     this.xpText = this.add.text(480, 18, "Level 1  XP 0/100", this.textStyle(18));
     this.backpackText = this.add.text(790, 18, "Backpack 0/5", this.textStyle(18));
-    this.looseBookText = this.add.text(1010, 18, "Loose 0", this.textStyle(18));
+    this.looseBookText = this.add.text(1010, 18, "Loose 0  Carried 0", this.textStyle(18));
 
     this.add.rectangle(345, 44, 180, 8, 0x334155, 1);
     this.chaosBar = this.add.rectangle(255, 44, 0, 8, gameConfig.colors.chaos, 1);
@@ -49,7 +49,7 @@ export class HudScene extends Phaser.Scene {
     this.chaosText?.setText(`Chaos ${Math.round(state.chaosPercent)}%`);
     this.xpText?.setText(`Level ${state.level}  XP ${state.xp}/${state.xpToNextLevel}`);
     this.backpackText?.setText(`Backpack ${state.backpackCount}/${state.backpackCapacity}`);
-    this.looseBookText?.setText(`Loose ${state.looseBookCount}`);
+    this.looseBookText?.setText(`Loose ${state.looseBookCount}  Carried ${state.carriedBookCount}`);
     this.chaosBar?.setSize(180 * (state.chaosPercent / 100), 8);
     this.xpBar?.setSize(180 * (state.xp / state.xpToNextLevel), 8);
   }

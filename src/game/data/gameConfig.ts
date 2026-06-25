@@ -27,6 +27,8 @@ export const gameConfig = {
     shelfTrim: 0xd7a85f,
     player: 0x3fb7ff,
     playerAccent: 0xf8fafc,
+    child: 0xf97316,
+    childAccent: 0xffedd5,
     hudText: "#f8fafc",
     hudMuted: "#a7b7aa",
     chaos: 0xef4444,

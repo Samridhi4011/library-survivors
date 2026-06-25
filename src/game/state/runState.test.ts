@@ -27,6 +27,7 @@ describe("runState", () => {
       backpackCount: 0,
       backpackCapacity: 5,
       looseBookCount: 0,
+      carriedBookCount: 0,
       isPaused: false,
       status: "running",
       perfectVictory: false

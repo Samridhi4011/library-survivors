@@ -2,10 +2,12 @@ import Phaser from "phaser";
 import { coreLoopConfig } from "../data/coreLoopConfig";
 import { gameConfig } from "../data/gameConfig";
 import { shelfConfigs } from "../data/libraryLayout";
+import { Child } from "../entities/Child";
 import { LooseBook } from "../entities/LooseBook";
 import { Player } from "../entities/Player";
 import { Shelf } from "../entities/Shelf";
 import {
+  addXp,
   addBookToBackpack,
   createInitialRunState,
   endRun,
@@ -23,9 +25,9 @@ export class GameScene extends Phaser.Scene {
   private player?: Player;
   private runState: RunState = createInitialRunState();
   private shelves: Shelf[] = [];
+  private libraryChildren: Child[] = [];
   private looseBooks: LooseBook[] = [];
   private nextBookId = 1;
-  private spawnAccumulatorSeconds = 0;
   private runEndEmitted = false;
   private pauseKey?: Phaser.Input.Keyboard.Key;
   private levelPreviewKey?: Phaser.Input.Keyboard.Key;
@@ -41,7 +43,12 @@ export class GameScene extends Phaser.Scene {
 
     this.drawLibraryFoundation();
     this.shelves = shelfConfigs.map((shelfConfig) => new Shelf(this, shelfConfig));
+    this.libraryChildren = this.createChildren();
     this.player = new Player(this, gameConfig.player.startX, gameConfig.player.startY);
+    this.physics.add.collider(
+      this.player.gameObject,
+      this.shelves.map((shelf) => shelf.collider)
+    );
     this.cameras.main.startFollow(this.player.gameObject, true, 0.08, 0.08);
 
     if (!this.input.keyboard) {
@@ -73,7 +80,8 @@ export class GameScene extends Phaser.Scene {
     };
 
     this.player?.update();
-    this.updatePrototypeMisplacementFeed(deltaSeconds);
+    this.handleChildInterceptions();
+    this.updateChildren(deltaSeconds);
     this.handleAutomaticPickup();
     this.handleAutomaticShelving();
     this.updateChaos(deltaSeconds);
@@ -100,18 +108,6 @@ export class GameScene extends Phaser.Scene {
     }
   }
 
-  private updatePrototypeMisplacementFeed(deltaSeconds: number): void {
-    this.spawnAccumulatorSeconds += deltaSeconds;
-
-    while (
-      this.spawnAccumulatorSeconds >= coreLoopConfig.looseBooks.spawnIntervalSeconds &&
-      this.looseBooks.length < coreLoopConfig.looseBooks.maxCount
-    ) {
-      this.spawnAccumulatorSeconds -= coreLoopConfig.looseBooks.spawnIntervalSeconds;
-      this.spawnLooseBook();
-    }
-  }
-
   private handleAutomaticPickup(): void {
     if (!this.player || this.runState.backpackCount >= this.runState.backpackCapacity) {
       return;
@@ -133,6 +129,59 @@ export class GameScene extends Phaser.Scene {
 
       if (this.runState.backpackCount >= this.runState.backpackCapacity) {
         break;
+      }
+    }
+  }
+
+  private handleChildInterceptions(): void {
+    if (!this.player || this.runState.backpackCount >= this.runState.backpackCapacity) {
+      return;
+    }
+
+    for (const child of this.libraryChildren) {
+      if (!child.canBeInterceptedBy(this.player.x, this.player.y)) {
+        continue;
+      }
+
+      const category = child.intercept();
+
+      if (!category) {
+        continue;
+      }
+
+      this.runState = addBookToBackpack(this.runState, category);
+      this.runState = addXp(this.runState, coreLoopConfig.children.interceptionBonusXp);
+      this.createFloatingText(
+        `+${coreLoopConfig.children.interceptionBonusXp} XP`,
+        this.player.x,
+        this.player.y - 42,
+        gameConfig.colors.hudText
+      );
+
+      if (this.runState.backpackCount >= this.runState.backpackCapacity) {
+        break;
+      }
+    }
+  }
+
+  private updateChildren(deltaSeconds: number): void {
+    if (!this.player) {
+      return;
+    }
+
+    for (const child of this.libraryChildren) {
+      const actions = child.update({
+        deltaSeconds,
+        shelves: this.shelves,
+        playerX: this.player.x,
+        playerY: this.player.y
+      });
+
+      for (const action of actions) {
+        if (action.type === "drop-book") {
+          // Children are the ongoing source of new disorder after Milestone 3.
+          this.createLooseBook(action.category, action.x, action.y);
+        }
       }
     }
   }
@@ -169,10 +218,16 @@ export class GameScene extends Phaser.Scene {
     const chaosGrowthRate = calculateChaosGrowthRate(
       this.looseBooks.map((book) => ({
         ageSeconds: book.ageAt(this.runState.elapsedSeconds)
-      }))
+      })),
+      this.getCarriedBookCount()
     );
 
-    this.runState = setLooseBookPressure(this.runState, this.looseBooks.length, chaosGrowthRate);
+    this.runState = setLooseBookPressure(
+      this.runState,
+      this.looseBooks.length,
+      this.getCarriedBookCount(),
+      chaosGrowthRate
+    );
     this.runState = setChaosPercent(
       this.runState,
       this.runState.chaosPercent + chaosGrowthRate * deltaSeconds
@@ -209,10 +264,12 @@ export class GameScene extends Phaser.Scene {
     this.runState = setLooseBookPressure(
       this.runState,
       this.looseBooks.length,
+      this.getCarriedBookCount(),
       calculateChaosGrowthRate(
         this.looseBooks.map((book) => ({
           ageSeconds: book.ageAt(this.runState.elapsedSeconds)
-        }))
+        })),
+        this.getCarriedBookCount()
       )
     );
   }
@@ -221,17 +278,44 @@ export class GameScene extends Phaser.Scene {
     const sourceShelf = Phaser.Utils.Array.GetRandom(this.shelves);
     const spawnPoint = this.pickLooseBookSpawnPoint(sourceShelf);
 
+    this.createLooseBook(sourceShelf.config.category, spawnPoint.x, spawnPoint.y);
+  }
+
+  private createLooseBook(category: Shelf["config"]["category"], x: number, y: number): void {
+    if (this.looseBooks.length >= coreLoopConfig.looseBooks.maxCount) {
+      return;
+    }
+
     this.looseBooks.push(
       new LooseBook(
         this,
         this.nextBookId,
-        sourceShelf.config.category,
-        spawnPoint.x,
-        spawnPoint.y,
+        category,
+        Phaser.Math.Clamp(x, 36, gameConfig.world.width - 36),
+        Phaser.Math.Clamp(y, 46, gameConfig.world.height - 46),
         this.runState.elapsedSeconds
       )
     );
     this.nextBookId += 1;
+  }
+
+  private getCarriedBookCount(): number {
+    return this.libraryChildren.filter((child) => child.isCarryingBook).length;
+  }
+
+  private createChildren(): Child[] {
+    const spawnPositions = [
+      [150, 140],
+      [1460, 180],
+      [180, 520],
+      [1410, 560],
+      [410, 910],
+      [1180, 900]
+    ] as const;
+
+    return spawnPositions
+      .slice(0, coreLoopConfig.children.initialCount)
+      .map(([x, y]) => new Child(this, x, y));
   }
 
   private pickLooseBookSpawnPoint(sourceShelf: Shelf): Phaser.Math.Vector2 {
@@ -295,7 +379,5 @@ export class GameScene extends Phaser.Scene {
         0.45
       );
     }
-
-    // Milestone 2 uses an ambient misplacement feed until child-driven book theft arrives.
   }
 }
