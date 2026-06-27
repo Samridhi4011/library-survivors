@@ -38,5 +38,20 @@ export const coreLoopConfig = {
     carriedBookPercentPerSecond: 0.018,
     bookAgePercentPerSecond: 0.0018,
     maxAgeContributionSeconds: 90
+  },
+  progression: {
+    xpRequirements: [100, 180, 300, 460, 680, 950],
+    xpRequirementIncreaseAfterTable: 320,
+    childSpawnIntervalMultiplierPerLevel: 0.94,
+    minimumChildSpawnIntervalSeconds: 2.4,
+    maxChildrenIncreasePerLevel: 1,
+    maximumChildren: 12,
+    childSpeedMultiplierPerLevel: 1.04,
+    maximumChildSpeedMultiplier: 1.5,
+    chaosMultiplierPerLevel: 0.06,
+    maximumChaosMultiplier: 1.6,
+    multipleBookTheftChance: 0.28,
+    multipleBookTheftChanceIncreasePerLevel: 0.05,
+    maximumMultipleBookTheftChance: 0.75
   }
 } as const;

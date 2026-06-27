@@ -17,6 +17,13 @@ import {
   type RunState
 } from "../state/runState";
 import { calculateChaosGrowthRate } from "../systems/chaos";
+import {
+  getChaosDifficultyMultiplier,
+  getChildSpawnIntervalSeconds,
+  getChildSpeedMultiplier,
+  getMaximumChildCount,
+  getMultipleBookTheftChance
+} from "../systems/progression";
 import { GameEvents } from "../types/events";
 import { distanceSquared } from "../utils/math";
 import { getRunTargetSeconds } from "../utils/runClock";
@@ -31,7 +38,7 @@ export class GameScene extends Phaser.Scene {
   private runEndEmitted = false;
   private pauseKey?: Phaser.Input.Keyboard.Key;
   private levelPreviewKey?: Phaser.Input.Keyboard.Key;
-  private childSpawnSecondsRemaining = coreLoopConfig.children.spawnIntervalSeconds;
+  private childSpawnSecondsRemaining: number = coreLoopConfig.children.spawnIntervalSeconds;
   private readonly childEntrances = [
     new Phaser.Math.Vector2(48, 100),
     new Phaser.Math.Vector2(1552, 100),
@@ -41,6 +48,12 @@ export class GameScene extends Phaser.Scene {
     new Phaser.Math.Vector2(1200, 952)
   ];
   private readonly childWaypoints = [
+    new Phaser.Math.Vector2(150, 90),
+    new Phaser.Math.Vector2(400, 90),
+    new Phaser.Math.Vector2(650, 90),
+    new Phaser.Math.Vector2(900, 90),
+    new Phaser.Math.Vector2(1150, 90),
+    new Phaser.Math.Vector2(1450, 90),
     new Phaser.Math.Vector2(150, 270),
     new Phaser.Math.Vector2(400, 270),
     new Phaser.Math.Vector2(650, 270),
@@ -238,7 +251,13 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateChildSpawning(deltaSeconds: number): void {
-    if (this.libraryChildren.length >= coreLoopConfig.children.maxCount) {
+    const spawnIntervalSeconds = getChildSpawnIntervalSeconds(this.runState.level);
+    this.childSpawnSecondsRemaining = Math.min(
+      this.childSpawnSecondsRemaining,
+      spawnIntervalSeconds
+    );
+
+    if (this.libraryChildren.length >= getMaximumChildCount(this.runState.level)) {
       return;
     }
 
@@ -248,7 +267,7 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    this.childSpawnSecondsRemaining = coreLoopConfig.children.spawnIntervalSeconds;
+    this.childSpawnSecondsRemaining = spawnIntervalSeconds;
     this.libraryChildren.push(this.createChild());
   }
 
@@ -281,13 +300,14 @@ export class GameScene extends Phaser.Scene {
   }
 
   private updateChaos(deltaSeconds: number): void {
-    const chaosGrowthRate = calculateChaosGrowthRate(
-      this.looseBooks.map((book) => ({
-        ageSeconds: book.ageAt(this.runState.elapsedSeconds),
-        chaosMultiplier: book.chaosMultiplier
-      })),
-      this.getCarriedBookCount()
-    );
+    const chaosGrowthRate =
+      calculateChaosGrowthRate(
+        this.looseBooks.map((book) => ({
+          ageSeconds: book.ageAt(this.runState.elapsedSeconds),
+          chaosMultiplier: book.chaosMultiplier
+        })),
+        this.getCarriedBookCount()
+      ) * getChaosDifficultyMultiplier(this.runState.level);
 
     this.runState = setLooseBookPressure(
       this.runState,
@@ -338,7 +358,7 @@ export class GameScene extends Phaser.Scene {
           chaosMultiplier: book.chaosMultiplier
         })),
         this.getCarriedBookCount()
-      )
+      ) * getChaosDifficultyMultiplier(this.runState.level)
     );
   }
 
@@ -407,14 +427,16 @@ export class GameScene extends Phaser.Scene {
     const [minInteractionSeconds, maxInteractionSeconds] =
       coreLoopConfig.children.interactionSecondsRange;
     const [minMessiness, maxMessiness] = coreLoopConfig.children.messinessRange;
+    const speedMultiplier = getChildSpeedMultiplier(this.runState.level);
 
     return {
-      movementSpeed: Phaser.Math.FloatBetween(minSpeed, maxSpeed),
+      movementSpeed: Phaser.Math.FloatBetween(minSpeed, maxSpeed) * speedMultiplier,
       interactionSeconds: Phaser.Math.FloatBetween(
         minInteractionSeconds,
         maxInteractionSeconds
       ),
-      messiness: Phaser.Math.FloatBetween(minMessiness, maxMessiness)
+      messiness: Phaser.Math.FloatBetween(minMessiness, maxMessiness),
+      multipleBookTheftChance: getMultipleBookTheftChance(this.runState.level)
     };
   }
 

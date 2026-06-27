@@ -18,6 +18,7 @@ export interface ChildStats {
   movementSpeed: number;
   interactionSeconds: number;
   messiness: number;
+  multipleBookTheftChance: number;
 }
 
 export interface ChildDropBookAction {
@@ -57,6 +58,7 @@ export class Child {
   private carriedCategories: BookCategory[] = [];
   private leavingObjective: LeavingObjective = "exit-library";
   private previousPosition = new Phaser.Math.Vector2();
+  private previousWaypoint?: Phaser.Math.Vector2;
   private stuckSeconds = 0;
 
   public constructor(
@@ -195,7 +197,7 @@ export class Child {
     this.wanderSecondsRemaining -= context.deltaSeconds;
 
     if (this.isAtTarget()) {
-      this.setDestination(Phaser.Utils.Array.GetRandom(context.waypoints));
+      this.setDestination(this.chooseWaypoint(context.waypoints));
     }
 
     if (isAfraid) {
@@ -210,13 +212,13 @@ export class Child {
 
     if (!shelf) {
       this.resetWanderTimer();
-      this.setDestination(Phaser.Utils.Array.GetRandom(context.waypoints));
+      this.setDestination(this.chooseWaypoint(context.waypoints));
       return;
     }
 
     this.interactionShelf = shelf;
     this.state = "choosing-shelf";
-    this.setDestination(this.getShelfInteractionPoint(shelf));
+    this.setDestinationViaAisle(this.getShelfInteractionPoint(shelf), context.waypoints);
   }
 
   private updateChoosingShelf(context: ChildUpdateContext, isAfraid: boolean): void {
@@ -308,16 +310,26 @@ export class Child {
       {
         length: this.chooseMessyBookCount(
           coreLoopConfig.children.theftBookCountRange[0],
-          coreLoopConfig.children.theftBookCountRange[1]
+          coreLoopConfig.children.theftBookCountRange[0]
         )
       },
       () => shelf.config.category
     );
+    if (
+      coreLoopConfig.children.theftBookCountRange[1] >
+        coreLoopConfig.children.theftBookCountRange[0] &&
+      Math.random() < this.stats.multipleBookTheftChance
+    ) {
+      this.carriedCategories.push(shelf.config.category);
+    }
     this.deliveryShelf = this.selectDeliveryShelf(context.shelves, shelf);
     this.showCarriedBooks();
     this.state = "leaving";
     this.leavingObjective = "deliver-books";
-    this.setDestination(this.getShelfInteractionPoint(this.deliveryShelf));
+    this.setDestinationViaAisle(
+      this.getShelfInteractionPoint(this.deliveryShelf),
+      context.waypoints
+    );
 
     return [];
   }
@@ -328,7 +340,7 @@ export class Child {
     this.deliveryShelf = undefined;
     this.detourReturnTarget = undefined;
     this.resetWanderTimer();
-    this.setDestination(Phaser.Utils.Array.GetRandom(waypoints));
+    this.setDestination(this.chooseWaypoint(waypoints));
   }
 
   private beginLeavingForExit(exit = this.target): void {
@@ -409,21 +421,11 @@ export class Child {
   }
 
   private selectNearbyShelf(shelves: Shelf[]): Shelf | undefined {
-    const nearbyShelves = shelves.filter((shelf) =>
-      shelf.isWithinRange(this.sprite.x, this.sprite.y, coreLoopConfig.children.shelfSelectionRadius)
-    );
-
-    if (nearbyShelves.length === 0) {
+    if (shelves.length === 0) {
       return undefined;
     }
 
-    nearbyShelves.sort(
-      (a, b) =>
-        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, a.config.x, a.config.y) -
-        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, b.config.x, b.config.y)
-    );
-
-    return nearbyShelves[0];
+    return Phaser.Utils.Array.GetRandom(shelves);
   }
 
   private selectDeliveryShelf(shelves: Shelf[], sourceShelf: Shelf): Shelf {
@@ -519,12 +521,38 @@ export class Child {
     this.target.set(point.x, point.y);
   }
 
+  private setDestinationViaAisle(
+    destination: Phaser.Math.Vector2,
+    waypoints: Phaser.Math.Vector2[]
+  ): void {
+    const closestAisleDistance = Math.min(
+      ...waypoints.map((waypoint) => Math.abs(waypoint.y - destination.y))
+    );
+    const aisleWaypoints = waypoints.filter(
+      (waypoint) => Math.abs(waypoint.y - destination.y) <= closestAisleDistance + 1
+    );
+
+    this.detourReturnTarget = destination.clone();
+    this.setDestination(this.chooseWaypoint(aisleWaypoints));
+  }
+
+  private chooseWaypoint(waypoints: Phaser.Math.Vector2[]): Phaser.Math.Vector2 {
+    const previousWaypoint = this.previousWaypoint;
+    const candidates = previousWaypoint
+      ? waypoints.filter((waypoint) => !waypoint.equals(previousWaypoint))
+      : waypoints;
+    const waypoint = Phaser.Utils.Array.GetRandom(candidates.length > 0 ? candidates : waypoints);
+
+    this.previousWaypoint = waypoint;
+    return waypoint;
+  }
+
   private detourTowardWaypoint(waypoints: Phaser.Math.Vector2[]): void {
     if (!this.detourReturnTarget) {
       this.detourReturnTarget = this.target.clone();
     }
 
-    this.setDestination(Phaser.Utils.Array.GetRandom(waypoints));
+    this.setDestination(this.chooseWaypoint(waypoints));
   }
 
   private consumeDetourIfReached(): boolean {
