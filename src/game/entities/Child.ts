@@ -3,16 +3,29 @@ import type { BookCategory } from "../data/bookConfig";
 import { getBookTextureKey } from "../data/bookConfig";
 import { coreLoopConfig } from "../data/coreLoopConfig";
 import { gameConfig } from "../data/gameConfig";
-import type { Shelf } from "./Shelf";
 import { chooseChildBookBehavior, isWithinRadius } from "../systems/childAi";
+import type { Shelf } from "./Shelf";
 
-export type ChildState = "wander" | "choose-book" | "carry-book";
+export type ChildState =
+  | "entering"
+  | "wandering"
+  | "choosing-shelf"
+  | "interacting"
+  | "leaving"
+  | "despawn";
+
+export interface ChildStats {
+  movementSpeed: number;
+  interactionSeconds: number;
+  messiness: number;
+}
 
 export interface ChildDropBookAction {
   type: "drop-book";
   category: BookCategory;
   x: number;
   y: number;
+  chaosMultiplier: number;
 }
 
 export type ChildAction = ChildDropBookAction;
@@ -20,66 +33,96 @@ export type ChildAction = ChildDropBookAction;
 export interface ChildUpdateContext {
   deltaSeconds: number;
   shelves: Shelf[];
+  waypoints: Phaser.Math.Vector2[];
+  exits: Phaser.Math.Vector2[];
   playerX: number;
   playerY: number;
 }
 
-// Milestone 3 child AI owns movement and book-carrying state, while the scene
-// decides how emitted book-drop actions affect the wider run state.
+type LeavingObjective = "deliver-books" | "exit-library";
+
+// Smart Kid AI stays self-contained: the scene owns spawning/despawning, while
+// each child owns its state, steering target, carried books, and emitted mess.
 export class Child {
   private readonly sprite: Phaser.Physics.Arcade.Sprite;
-  private readonly carriedBookSprite: Phaser.GameObjects.Image;
-  private state: ChildState = "wander";
+  private readonly carriedBookSprites: Phaser.GameObjects.Image[] = [];
+  private readonly stats: ChildStats;
+  private state: ChildState = "entering";
   private target = new Phaser.Math.Vector2();
+  private detourReturnTarget?: Phaser.Math.Vector2;
   private interactionShelf?: Shelf;
+  private deliveryShelf?: Shelf;
   private interactionSecondsRemaining = 0;
-  private carriedCategory?: BookCategory;
+  private wanderSecondsRemaining = 0;
+  private carriedCategories: BookCategory[] = [];
+  private leavingObjective: LeavingObjective = "exit-library";
+  private previousPosition = new Phaser.Math.Vector2();
+  private stuckSeconds = 0;
 
-  public constructor(scene: Phaser.Scene, x: number, y: number) {
+  public constructor(
+    scene: Phaser.Scene,
+    x: number,
+    y: number,
+    stats: ChildStats,
+    firstWaypoint: Phaser.Math.Vector2
+  ) {
+    this.stats = stats;
     this.sprite = scene.physics.add.sprite(x, y, "child");
     this.sprite.setCollideWorldBounds(true);
     this.sprite.setDepth(8);
+    this.sprite.setCircle(12, 2, 2);
+    this.sprite.setMaxVelocity(
+      stats.movementSpeed * coreLoopConfig.children.fleeSpeedMultiplier
+    );
 
-    this.carriedBookSprite = scene.add.image(x, y - 26, getBookTextureKey("fiction"));
-    this.carriedBookSprite.setScale(0.72);
-    this.carriedBookSprite.setDepth(10);
-    this.carriedBookSprite.setVisible(false);
+    for (let index = 0; index < coreLoopConfig.children.theftBookCountRange[1]; index += 1) {
+      const carriedBookSprite = scene.add.image(x, y - 28 - index * 9, getBookTextureKey("fiction"));
+      carriedBookSprite.setScale(0.62);
+      carriedBookSprite.setDepth(10 + index);
+      carriedBookSprite.setVisible(false);
+      this.carriedBookSprites.push(carriedBookSprite);
+    }
 
-    this.pickWanderTarget();
+    this.previousPosition.set(x, y);
+    this.setDestination(firstWaypoint);
   }
 
   public update(context: ChildUpdateContext): ChildAction[] {
+    if (this.state === "despawn") {
+      return [];
+    }
+
     const actions: ChildAction[] = [];
     const isAfraid = this.isAfraidOf(context.playerX, context.playerY);
 
-    if (this.state === "choose-book") {
-      this.updateChoosing(context.deltaSeconds, isAfraid);
+    switch (this.state) {
+      case "entering":
+        this.updateEntering(context);
+        break;
+      case "wandering":
+        this.updateWandering(context, isAfraid);
+        break;
+      case "choosing-shelf":
+        this.updateChoosingShelf(context, isAfraid);
+        break;
+      case "interacting":
+        actions.push(...this.updateInteracting(context, isAfraid));
+        break;
+      case "leaving":
+        actions.push(...this.updateLeaving(context));
+        break;
     }
 
-    if (this.state === "wander") {
-      this.updateWandering(context.shelves, isAfraid);
-    }
-
-    if (this.state === "carry-book" && this.isAtTarget()) {
-      const droppedBook = this.dropCarriedBook(this.sprite.x, this.sprite.y);
-      if (droppedBook) {
-        actions.push(droppedBook);
-      }
-    }
-
-    this.move(context.deltaSeconds, context.playerX, context.playerY, isAfraid);
-    this.updateCarriedBookSprite();
-
-    if (this.state === "choose-book" && this.interactionSecondsRemaining <= 0) {
-      actions.push(...this.finishShelfInteraction());
-    }
+    this.move(context.playerX, context.playerY, isAfraid);
+    this.updateCarriedBookSprites();
+    this.updateStuckRecovery(context);
 
     return actions;
   }
 
   public canBeInterceptedBy(playerX: number, playerY: number): boolean {
     return (
-      this.carriedCategory !== undefined &&
+      this.carriedCategories.length > 0 &&
       isWithinRadius(
         this.sprite.x,
         this.sprite.y,
@@ -90,121 +133,224 @@ export class Child {
     );
   }
 
-  public intercept(): BookCategory | undefined {
-    const category = this.carriedCategory;
+  public intercept(exit: Phaser.Math.Vector2, maxBookCount = Number.POSITIVE_INFINITY): BookCategory[] {
+    const categories = this.carriedCategories.splice(0, Math.max(0, maxBookCount));
 
-    if (!category) {
-      return undefined;
+    if (categories.length === 0) {
+      return [];
     }
 
-    this.carriedCategory = undefined;
-    this.carriedBookSprite.setVisible(false);
-    this.state = "wander";
-    this.interactionShelf = undefined;
-    this.pickWanderTarget();
+    if (this.carriedCategories.length === 0) {
+      this.deliveryShelf = undefined;
+      this.hideCarriedBooks();
+      this.beginLeavingForExit(exit);
+    } else {
+      this.showCarriedBooks();
+    }
 
-    return category;
+    return categories;
+  }
+
+  public get carriedBookCount(): number {
+    return this.carriedCategories.length;
   }
 
   public get isCarryingBook(): boolean {
-    return this.carriedCategory !== undefined;
+    return this.carriedBookCount > 0;
+  }
+
+  public get shouldDespawn(): boolean {
+    return this.state === "despawn";
+  }
+
+  public get gameObject(): Phaser.Physics.Arcade.Sprite {
+    return this.sprite;
   }
 
   public destroy(): void {
     this.sprite.destroy();
-    this.carriedBookSprite.destroy();
+
+    for (const carriedBookSprite of this.carriedBookSprites) {
+      carriedBookSprite.destroy();
+    }
   }
 
-  private updateChoosing(deltaSeconds: number, isAfraid: boolean): void {
-    if (isAfraid) {
-      this.state = "wander";
-      this.interactionShelf = undefined;
-      this.interactionSecondsRemaining = 0;
-      this.pickWanderTarget();
+  private updateEntering(context: ChildUpdateContext): void {
+    if (this.consumeDetourIfReached()) {
       return;
     }
 
-    this.sprite.setVelocity(0, 0);
-    this.interactionSecondsRemaining -= deltaSeconds;
+    if (!this.isAtTarget()) {
+      return;
+    }
+
+    this.beginWandering(context.waypoints);
   }
 
-  private updateWandering(shelves: Shelf[], isAfraid: boolean): void {
+  private updateWandering(context: ChildUpdateContext, isAfraid: boolean): void {
+    if (this.consumeDetourIfReached()) {
+      return;
+    }
+
+    this.wanderSecondsRemaining -= context.deltaSeconds;
+
     if (this.isAtTarget()) {
-      this.pickWanderTarget();
+      this.setDestination(Phaser.Utils.Array.GetRandom(context.waypoints));
     }
 
     if (isAfraid) {
       return;
     }
 
-    const shelf = shelves.find((candidate) =>
-      candidate.isWithinRange(
-        this.sprite.x,
-        this.sprite.y,
-        coreLoopConfig.children.shelfDiscoveryRadius
-      )
-    );
-
-    if (!shelf) {
+    if (this.wanderSecondsRemaining > 0) {
       return;
     }
 
-    this.state = "choose-book";
-    this.interactionShelf = shelf;
-    this.interactionSecondsRemaining = coreLoopConfig.children.shelfInteractionSeconds;
-  }
-
-  private finishShelfInteraction(): ChildAction[] {
-    const shelf = this.interactionShelf;
+    const shelf = this.selectNearbyShelf(context.shelves);
 
     if (!shelf) {
-      this.state = "wander";
-      this.pickWanderTarget();
+      this.resetWanderTimer();
+      this.setDestination(Phaser.Utils.Array.GetRandom(context.waypoints));
+      return;
+    }
+
+    this.interactionShelf = shelf;
+    this.state = "choosing-shelf";
+    this.setDestination(this.getShelfInteractionPoint(shelf));
+  }
+
+  private updateChoosingShelf(context: ChildUpdateContext, isAfraid: boolean): void {
+    if (isAfraid) {
+      this.interactionShelf = undefined;
+      this.beginWandering(context.waypoints);
+      return;
+    }
+
+    if (this.consumeDetourIfReached()) {
+      return;
+    }
+
+    if (!this.isAtTarget()) {
+      return;
+    }
+
+    this.state = "interacting";
+    this.interactionSecondsRemaining = this.stats.interactionSeconds;
+    this.sprite.setVelocity(0, 0);
+  }
+
+  private updateInteracting(context: ChildUpdateContext, isAfraid: boolean): ChildAction[] {
+    if (isAfraid) {
+      this.interactionShelf = undefined;
+      this.beginWandering(context.waypoints);
       return [];
     }
 
-    const behavior = chooseChildBookBehavior(Math.random(), coreLoopConfig.children.theftChance);
-    this.interactionShelf = undefined;
+    this.sprite.setVelocity(0, 0);
+    this.interactionSecondsRemaining -= context.deltaSeconds;
 
-    if (behavior === "local-drop") {
-      this.state = "wander";
-      this.pickWanderTarget();
-      return [
-        {
-          type: "drop-book",
-          category: shelf.config.category,
-          x: shelf.config.x + Phaser.Math.Between(-58, 58),
-          y: shelf.config.y + Phaser.Math.Between(-62, 62)
-        }
-      ];
+    if (this.interactionSecondsRemaining > 0) {
+      return [];
     }
 
-    // Theft creates a moving objective: the child visibly carries the book until
-    // either intercepted by the librarian or it reaches a far destination.
-    this.carriedCategory = shelf.config.category;
-    this.carriedBookSprite.setTexture(getBookTextureKey(shelf.config.category));
-    this.carriedBookSprite.setVisible(true);
-    this.state = "carry-book";
-    this.pickTheftDestination(shelf);
+    return this.finishShelfInteraction(context);
+  }
+
+  private updateLeaving(context: ChildUpdateContext): ChildAction[] {
+    if (this.consumeDetourIfReached()) {
+      return [];
+    }
+
+    if (!this.isAtTarget()) {
+      return [];
+    }
+
+    if (this.leavingObjective === "deliver-books" && this.deliveryShelf) {
+      const actions = this.dropCarriedBooksNear(this.deliveryShelf);
+      this.beginLeavingForExit(Phaser.Utils.Array.GetRandom(context.exits));
+      return actions;
+    }
+
+    this.state = "despawn";
+    this.sprite.setVelocity(0, 0);
+    this.hideCarriedBooks();
     return [];
   }
 
-  private move(
-    deltaSeconds: number,
-    playerX: number,
-    playerY: number,
-    isAfraid: boolean
-  ): void {
-    if (this.state === "choose-book") {
+  private finishShelfInteraction(context: ChildUpdateContext): ChildAction[] {
+    const shelf = this.interactionShelf;
+    this.interactionShelf = undefined;
+
+    if (!shelf) {
+      this.beginLeavingForExit(Phaser.Utils.Array.GetRandom(context.exits));
+      return [];
+    }
+
+    const behavior = chooseChildBookBehavior(
+      Math.random(),
+      1 - coreLoopConfig.children.localDropChance
+    );
+
+    if (behavior === "local-drop") {
+      const actions = this.createDropActionsNearShelf(
+        shelf,
+        this.chooseMessyBookCount(
+          coreLoopConfig.children.localDropBookCountRange[0],
+          coreLoopConfig.children.localDropBookCountRange[1]
+        ),
+        coreLoopConfig.looseBooks.localChaosMultiplier
+      );
+      this.beginLeavingForExit(Phaser.Utils.Array.GetRandom(context.exits));
+      return actions;
+    }
+
+    this.carriedCategories = Array.from(
+      {
+        length: this.chooseMessyBookCount(
+          coreLoopConfig.children.theftBookCountRange[0],
+          coreLoopConfig.children.theftBookCountRange[1]
+        )
+      },
+      () => shelf.config.category
+    );
+    this.deliveryShelf = this.selectDeliveryShelf(context.shelves, shelf);
+    this.showCarriedBooks();
+    this.state = "leaving";
+    this.leavingObjective = "deliver-books";
+    this.setDestination(this.getShelfInteractionPoint(this.deliveryShelf));
+
+    return [];
+  }
+
+  private beginWandering(waypoints: Phaser.Math.Vector2[]): void {
+    this.state = "wandering";
+    this.interactionShelf = undefined;
+    this.deliveryShelf = undefined;
+    this.detourReturnTarget = undefined;
+    this.resetWanderTimer();
+    this.setDestination(Phaser.Utils.Array.GetRandom(waypoints));
+  }
+
+  private beginLeavingForExit(exit = this.target): void {
+    this.state = "leaving";
+    this.leavingObjective = "exit-library";
+    this.deliveryShelf = undefined;
+    this.detourReturnTarget = undefined;
+    this.setDestination(exit);
+  }
+
+  private move(playerX: number, playerY: number, isAfraid: boolean): void {
+    if (this.state === "interacting" || this.state === "despawn") {
       return;
     }
 
-    const movement = new Phaser.Math.Vector2();
+    const movement = new Phaser.Math.Vector2(this.target.x - this.sprite.x, this.target.y - this.sprite.y);
 
-    if (isAfraid) {
-      movement.set(this.sprite.x - playerX, this.sprite.y - playerY);
-    } else {
-      movement.set(this.target.x - this.sprite.x, this.target.y - this.sprite.y);
+    if (isAfraid && this.state !== "entering" && this.state !== "leaving") {
+      const flee = new Phaser.Math.Vector2(this.sprite.x - playerX, this.sprite.y - playerY);
+      if (flee.lengthSq() > 0) {
+        movement.add(flee.normalize().scale(coreLoopConfig.children.fearRadius));
+      }
     }
 
     if (movement.lengthSq() === 0) {
@@ -212,36 +358,183 @@ export class Child {
       return;
     }
 
-    const speed = isAfraid
-      ? coreLoopConfig.children.fleeSpeed
-      : this.carriedCategory
-        ? coreLoopConfig.children.carryingSpeed
-        : coreLoopConfig.children.speed;
+    const speed = this.carriedCategories.length > 0
+      ? this.stats.movementSpeed * coreLoopConfig.children.carryingSpeedMultiplier
+      : isAfraid
+        ? this.stats.movementSpeed * coreLoopConfig.children.fleeSpeedMultiplier
+        : this.stats.movementSpeed;
 
-    movement.normalize().scale(speed * deltaSeconds);
+    movement.normalize().scale(speed);
+    this.sprite.setVelocity(movement.x, movement.y);
     this.sprite.setPosition(
-      Phaser.Math.Clamp(this.sprite.x + movement.x, 24, gameConfig.world.width - 24),
-      Phaser.Math.Clamp(this.sprite.y + movement.y, 24, gameConfig.world.height - 24)
+      Phaser.Math.Clamp(this.sprite.x, 24, gameConfig.world.width - 24),
+      Phaser.Math.Clamp(this.sprite.y, 24, gameConfig.world.height - 24)
     );
   }
 
-  private dropCarriedBook(x: number, y: number): ChildDropBookAction | undefined {
-    if (!this.carriedCategory) {
+  private updateStuckRecovery(context: ChildUpdateContext): void {
+    if (this.state === "interacting" || this.state === "despawn" || this.isAtTarget()) {
+      this.previousPosition.set(this.sprite.x, this.sprite.y);
+      this.stuckSeconds = 0;
+      return;
+    }
+
+    this.stuckSeconds += context.deltaSeconds;
+
+    if (this.stuckSeconds < coreLoopConfig.children.stuckSecondsBeforeRetarget) {
+      return;
+    }
+
+    const movedDistance = Phaser.Math.Distance.Between(
+      this.previousPosition.x,
+      this.previousPosition.y,
+      this.sprite.x,
+      this.sprite.y
+    );
+
+    this.previousPosition.set(this.sprite.x, this.sprite.y);
+    this.stuckSeconds = 0;
+
+    if (movedDistance >= coreLoopConfig.children.stuckDistanceThreshold) {
+      return;
+    }
+
+    if (this.state === "choosing-shelf") {
+      this.interactionShelf = undefined;
+      this.beginWandering(context.waypoints);
+      return;
+    }
+
+    this.detourTowardWaypoint(context.waypoints);
+  }
+
+  private selectNearbyShelf(shelves: Shelf[]): Shelf | undefined {
+    const nearbyShelves = shelves.filter((shelf) =>
+      shelf.isWithinRange(this.sprite.x, this.sprite.y, coreLoopConfig.children.shelfSelectionRadius)
+    );
+
+    if (nearbyShelves.length === 0) {
       return undefined;
     }
 
-    const category = this.carriedCategory;
-    this.carriedCategory = undefined;
-    this.carriedBookSprite.setVisible(false);
-    this.state = "wander";
-    this.pickWanderTarget();
+    nearbyShelves.sort(
+      (a, b) =>
+        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, a.config.x, a.config.y) -
+        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, b.config.x, b.config.y)
+    );
 
-    return {
-      type: "drop-book",
-      category,
-      x,
-      y
-    };
+    return nearbyShelves[0];
+  }
+
+  private selectDeliveryShelf(shelves: Shelf[], sourceShelf: Shelf): Shelf {
+    const candidates = shelves.filter((shelf) => shelf.config.id !== sourceShelf.config.id);
+    return Phaser.Utils.Array.GetRandom(candidates);
+  }
+
+  private createDropActionsNearShelf(
+    shelf: Shelf,
+    count: number,
+    chaosMultiplier: number
+  ): ChildDropBookAction[] {
+    return Array.from({ length: count }, () => {
+      const point = this.getShelfDropPoint(shelf);
+
+      return {
+        type: "drop-book",
+        category: shelf.config.category,
+        x: point.x,
+        y: point.y,
+        chaosMultiplier
+      };
+    });
+  }
+
+  private dropCarriedBooksNear(shelf: Shelf): ChildDropBookAction[] {
+    const actions = this.carriedCategories.map((category) => {
+      const point = this.getShelfDropPoint(shelf);
+
+      return {
+        type: "drop-book" as const,
+        category,
+        x: point.x,
+        y: point.y,
+        chaosMultiplier: coreLoopConfig.looseBooks.relocatedChaosMultiplier
+      };
+    });
+
+    this.carriedCategories = [];
+    this.hideCarriedBooks();
+
+    return actions;
+  }
+
+  private getShelfInteractionPoint(shelf: Shelf): Phaser.Math.Vector2 {
+    const points = [
+      new Phaser.Math.Vector2(shelf.config.x, shelf.config.y - 72),
+      new Phaser.Math.Vector2(shelf.config.x, shelf.config.y + 72),
+      new Phaser.Math.Vector2(shelf.config.x - 104, shelf.config.y),
+      new Phaser.Math.Vector2(shelf.config.x + 104, shelf.config.y)
+    ];
+
+    points.sort(
+      (a, b) =>
+        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, a.x, a.y) -
+        Phaser.Math.Distance.Squared(this.sprite.x, this.sprite.y, b.x, b.y)
+    );
+
+    return this.clampWorldPoint(points[0]);
+  }
+
+  private getShelfDropPoint(shelf: Shelf): Phaser.Math.Vector2 {
+    const side = Phaser.Utils.Array.GetRandom([
+      new Phaser.Math.Vector2(0, -68),
+      new Phaser.Math.Vector2(0, 68),
+      new Phaser.Math.Vector2(-96, 0),
+      new Phaser.Math.Vector2(96, 0)
+    ]);
+
+    return this.clampWorldPoint(
+      new Phaser.Math.Vector2(
+        shelf.config.x + side.x + Phaser.Math.Between(-22, 22),
+        shelf.config.y + side.y + Phaser.Math.Between(-18, 18)
+      )
+    );
+  }
+
+  private chooseMessyBookCount(min: number, max: number): number {
+    if (min === max) {
+      return min;
+    }
+
+    const upperBias = this.stats.messiness > 1.15 ? 0.62 : 0.28;
+    return Math.random() < upperBias ? max : Phaser.Math.Between(min, max);
+  }
+
+  private resetWanderTimer(): void {
+    const [minSeconds, maxSeconds] = coreLoopConfig.children.wanderDurationSecondsRange;
+    this.wanderSecondsRemaining = Phaser.Math.FloatBetween(minSeconds, maxSeconds);
+  }
+
+  private setDestination(point: Phaser.Math.Vector2): void {
+    this.target.set(point.x, point.y);
+  }
+
+  private detourTowardWaypoint(waypoints: Phaser.Math.Vector2[]): void {
+    if (!this.detourReturnTarget) {
+      this.detourReturnTarget = this.target.clone();
+    }
+
+    this.setDestination(Phaser.Utils.Array.GetRandom(waypoints));
+  }
+
+  private consumeDetourIfReached(): boolean {
+    if (!this.detourReturnTarget || !this.isAtTarget()) {
+      return false;
+    }
+
+    this.setDestination(this.detourReturnTarget);
+    this.detourReturnTarget = undefined;
+    return true;
   }
 
   private isAfraidOf(playerX: number, playerY: number): boolean {
@@ -264,28 +557,33 @@ export class Child {
     );
   }
 
-  private pickWanderTarget(): void {
-    this.target.set(
-      Phaser.Math.Between(80, gameConfig.world.width - 80),
-      Phaser.Math.Between(90, gameConfig.world.height - 90)
-    );
-  }
+  private showCarriedBooks(): void {
+    this.carriedBookSprites.forEach((sprite, index) => {
+      const category = this.carriedCategories[index];
+      sprite.setVisible(category !== undefined);
 
-  private pickTheftDestination(sourceShelf: Shelf): void {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const x = Phaser.Math.Between(80, gameConfig.world.width - 80);
-      const y = Phaser.Math.Between(90, gameConfig.world.height - 90);
-
-      if (!sourceShelf.isWithinRange(x, y, 360)) {
-        this.target.set(x, y);
-        return;
+      if (category) {
+        sprite.setTexture(getBookTextureKey(category));
       }
-    }
-
-    this.pickWanderTarget();
+    });
   }
 
-  private updateCarriedBookSprite(): void {
-    this.carriedBookSprite.setPosition(this.sprite.x, this.sprite.y - 28);
+  private hideCarriedBooks(): void {
+    for (const carriedBookSprite of this.carriedBookSprites) {
+      carriedBookSprite.setVisible(false);
+    }
+  }
+
+  private updateCarriedBookSprites(): void {
+    this.carriedBookSprites.forEach((sprite, index) => {
+      sprite.setPosition(this.sprite.x + (index - 0.5) * 12, this.sprite.y - 28 - index * 7);
+    });
+  }
+
+  private clampWorldPoint(point: Phaser.Math.Vector2): Phaser.Math.Vector2 {
+    return new Phaser.Math.Vector2(
+      Phaser.Math.Clamp(point.x, 32, gameConfig.world.width - 32),
+      Phaser.Math.Clamp(point.y, 42, gameConfig.world.height - 42)
+    );
   }
 }

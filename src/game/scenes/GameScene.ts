@@ -2,7 +2,7 @@ import Phaser from "phaser";
 import { coreLoopConfig } from "../data/coreLoopConfig";
 import { gameConfig } from "../data/gameConfig";
 import { shelfConfigs } from "../data/libraryLayout";
-import { Child } from "../entities/Child";
+import { Child, type ChildStats } from "../entities/Child";
 import { LooseBook } from "../entities/LooseBook";
 import { Player } from "../entities/Player";
 import { Shelf } from "../entities/Shelf";
@@ -31,6 +31,37 @@ export class GameScene extends Phaser.Scene {
   private runEndEmitted = false;
   private pauseKey?: Phaser.Input.Keyboard.Key;
   private levelPreviewKey?: Phaser.Input.Keyboard.Key;
+  private childSpawnSecondsRemaining = coreLoopConfig.children.spawnIntervalSeconds;
+  private readonly childEntrances = [
+    new Phaser.Math.Vector2(48, 100),
+    new Phaser.Math.Vector2(1552, 100),
+    new Phaser.Math.Vector2(48, 500),
+    new Phaser.Math.Vector2(1552, 500),
+    new Phaser.Math.Vector2(400, 952),
+    new Phaser.Math.Vector2(1200, 952)
+  ];
+  private readonly childWaypoints = [
+    new Phaser.Math.Vector2(150, 270),
+    new Phaser.Math.Vector2(400, 270),
+    new Phaser.Math.Vector2(650, 270),
+    new Phaser.Math.Vector2(900, 270),
+    new Phaser.Math.Vector2(1150, 270),
+    new Phaser.Math.Vector2(1450, 270),
+    new Phaser.Math.Vector2(150, 500),
+    new Phaser.Math.Vector2(400, 500),
+    new Phaser.Math.Vector2(650, 500),
+    new Phaser.Math.Vector2(900, 500),
+    new Phaser.Math.Vector2(1150, 500),
+    new Phaser.Math.Vector2(1450, 500),
+    new Phaser.Math.Vector2(150, 730),
+    new Phaser.Math.Vector2(400, 730),
+    new Phaser.Math.Vector2(650, 730),
+    new Phaser.Math.Vector2(900, 730),
+    new Phaser.Math.Vector2(1150, 730),
+    new Phaser.Math.Vector2(1450, 730),
+    new Phaser.Math.Vector2(260, 940),
+    new Phaser.Math.Vector2(1340, 940)
+  ];
 
   public constructor() {
     super("GameScene");
@@ -82,6 +113,7 @@ export class GameScene extends Phaser.Scene {
     this.player?.update();
     this.handleChildInterceptions();
     this.updateChildren(deltaSeconds);
+    this.updateChildSpawning(deltaSeconds);
     this.handleAutomaticPickup();
     this.handleAutomaticShelving();
     this.updateChaos(deltaSeconds);
@@ -143,13 +175,19 @@ export class GameScene extends Phaser.Scene {
         continue;
       }
 
-      const category = child.intercept();
+      const availableCapacity = this.runState.backpackCapacity - this.runState.backpackCount;
+      const categories = child.intercept(
+        Phaser.Utils.Array.GetRandom(this.childEntrances),
+        availableCapacity
+      );
 
-      if (!category) {
+      if (categories.length === 0) {
         continue;
       }
 
-      this.runState = addBookToBackpack(this.runState, category);
+      for (const category of categories) {
+        this.runState = addBookToBackpack(this.runState, category);
+      }
       this.runState = addXp(this.runState, coreLoopConfig.children.interceptionBonusXp);
       this.createFloatingText(
         `+${coreLoopConfig.children.interceptionBonusXp} XP`,
@@ -169,10 +207,13 @@ export class GameScene extends Phaser.Scene {
       return;
     }
 
-    for (const child of this.libraryChildren) {
+    for (let index = this.libraryChildren.length - 1; index >= 0; index -= 1) {
+      const child = this.libraryChildren[index];
       const actions = child.update({
         deltaSeconds,
         shelves: this.shelves,
+        waypoints: this.childWaypoints,
+        exits: this.childEntrances,
         playerX: this.player.x,
         playerY: this.player.y
       });
@@ -180,10 +221,35 @@ export class GameScene extends Phaser.Scene {
       for (const action of actions) {
         if (action.type === "drop-book") {
           // Children are the ongoing source of new disorder after Milestone 3.
-          this.createLooseBook(action.category, action.x, action.y);
+          this.createLooseBook(
+            action.category,
+            action.x,
+            action.y,
+            action.chaosMultiplier
+          );
         }
       }
+
+      if (child.shouldDespawn) {
+        child.destroy();
+        this.libraryChildren.splice(index, 1);
+      }
     }
+  }
+
+  private updateChildSpawning(deltaSeconds: number): void {
+    if (this.libraryChildren.length >= coreLoopConfig.children.maxCount) {
+      return;
+    }
+
+    this.childSpawnSecondsRemaining -= deltaSeconds;
+
+    if (this.childSpawnSecondsRemaining > 0) {
+      return;
+    }
+
+    this.childSpawnSecondsRemaining = coreLoopConfig.children.spawnIntervalSeconds;
+    this.libraryChildren.push(this.createChild());
   }
 
   private handleAutomaticShelving(): void {
@@ -217,7 +283,8 @@ export class GameScene extends Phaser.Scene {
   private updateChaos(deltaSeconds: number): void {
     const chaosGrowthRate = calculateChaosGrowthRate(
       this.looseBooks.map((book) => ({
-        ageSeconds: book.ageAt(this.runState.elapsedSeconds)
+        ageSeconds: book.ageAt(this.runState.elapsedSeconds),
+        chaosMultiplier: book.chaosMultiplier
       })),
       this.getCarriedBookCount()
     );
@@ -267,7 +334,8 @@ export class GameScene extends Phaser.Scene {
       this.getCarriedBookCount(),
       calculateChaosGrowthRate(
         this.looseBooks.map((book) => ({
-          ageSeconds: book.ageAt(this.runState.elapsedSeconds)
+          ageSeconds: book.ageAt(this.runState.elapsedSeconds),
+          chaosMultiplier: book.chaosMultiplier
         })),
         this.getCarriedBookCount()
       )
@@ -281,7 +349,12 @@ export class GameScene extends Phaser.Scene {
     this.createLooseBook(sourceShelf.config.category, spawnPoint.x, spawnPoint.y);
   }
 
-  private createLooseBook(category: Shelf["config"]["category"], x: number, y: number): void {
+  private createLooseBook(
+    category: Shelf["config"]["category"],
+    x: number,
+    y: number,
+    chaosMultiplier: number = coreLoopConfig.looseBooks.localChaosMultiplier
+  ): void {
     if (this.looseBooks.length >= coreLoopConfig.looseBooks.maxCount) {
       return;
     }
@@ -293,29 +366,56 @@ export class GameScene extends Phaser.Scene {
         category,
         Phaser.Math.Clamp(x, 36, gameConfig.world.width - 36),
         Phaser.Math.Clamp(y, 46, gameConfig.world.height - 46),
-        this.runState.elapsedSeconds
+        this.runState.elapsedSeconds,
+        chaosMultiplier
       )
     );
     this.nextBookId += 1;
   }
 
   private getCarriedBookCount(): number {
-    return this.libraryChildren.filter((child) => child.isCarryingBook).length;
+    return this.libraryChildren.reduce((total, child) => total + child.carriedBookCount, 0);
   }
 
   private createChildren(): Child[] {
-    const spawnPositions = [
-      [150, 140],
-      [1460, 180],
-      [180, 520],
-      [1410, 560],
-      [410, 910],
-      [1180, 900]
-    ] as const;
-
-    return spawnPositions
+    return this.childEntrances
       .slice(0, coreLoopConfig.children.initialCount)
-      .map(([x, y]) => new Child(this, x, y));
+      .map((entrance) => this.createChild(entrance));
+  }
+
+  private createChild(
+    entrance = Phaser.Utils.Array.GetRandom(this.childEntrances)
+  ): Child {
+    const child = new Child(
+      this,
+      entrance.x,
+      entrance.y,
+      this.createChildStats(),
+      Phaser.Utils.Array.GetRandom(this.childWaypoints)
+    );
+
+    this.physics.add.collider(
+      child.gameObject,
+      this.shelves.map((shelf) => shelf.collider)
+    );
+
+    return child;
+  }
+
+  private createChildStats(): ChildStats {
+    const [minSpeed, maxSpeed] = coreLoopConfig.children.baseSpeedRange;
+    const [minInteractionSeconds, maxInteractionSeconds] =
+      coreLoopConfig.children.interactionSecondsRange;
+    const [minMessiness, maxMessiness] = coreLoopConfig.children.messinessRange;
+
+    return {
+      movementSpeed: Phaser.Math.FloatBetween(minSpeed, maxSpeed),
+      interactionSeconds: Phaser.Math.FloatBetween(
+        minInteractionSeconds,
+        maxInteractionSeconds
+      ),
+      messiness: Phaser.Math.FloatBetween(minMessiness, maxMessiness)
+    };
   }
 
   private pickLooseBookSpawnPoint(sourceShelf: Shelf): Phaser.Math.Vector2 {

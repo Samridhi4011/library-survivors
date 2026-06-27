@@ -32,6 +32,21 @@ describe("calculateChaosGrowthRate", () => {
     ).toBeCloseTo(1.2);
   });
 
+  it("weights relocated loose books more heavily", () => {
+    expect(
+      calculateChaosGrowthRate(
+        [{ ageSeconds: 10, chaosMultiplier: 2 }],
+        0,
+        {
+          looseBookPercentPerSecond: 1,
+          carriedBookPercentPerSecond: 0.4,
+          bookAgePercentPerSecond: 0.1,
+          maxAgeContributionSeconds: 90
+        }
+      )
+    ).toBe(4);
+  });
+
   it("caps age pressure", () => {
     expect(
       calculateChaosGrowthRate(

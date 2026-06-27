@@ -2,6 +2,7 @@ import { coreLoopConfig } from "../data/coreLoopConfig";
 
 export interface LooseBookChaosSample {
   ageSeconds: number;
+  chaosMultiplier?: number;
 }
 
 export interface ChaosGrowthConfig {
@@ -22,10 +23,13 @@ export const calculateChaosGrowthRate = (
       config.maxAgeContributionSeconds
     );
 
+    const chaosMultiplier = Math.max(0, book.chaosMultiplier ?? 1);
+
     return (
       total +
-      config.looseBookPercentPerSecond +
-      cappedAgeSeconds * config.bookAgePercentPerSecond
+      (config.looseBookPercentPerSecond +
+        cappedAgeSeconds * config.bookAgePercentPerSecond) *
+        chaosMultiplier
     );
   }, 0);
 

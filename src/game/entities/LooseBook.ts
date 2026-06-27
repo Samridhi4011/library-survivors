@@ -6,6 +6,7 @@ export class LooseBook {
   public readonly id: number;
   public readonly category: BookCategory;
   public readonly spawnedAtSeconds: number;
+  public readonly chaosMultiplier: number;
   private readonly sprite: Phaser.GameObjects.Image;
 
   public constructor(
@@ -14,11 +15,13 @@ export class LooseBook {
     category: BookCategory,
     x: number,
     y: number,
-    spawnedAtSeconds: number
+    spawnedAtSeconds: number,
+    chaosMultiplier = 1
   ) {
     this.id = id;
     this.category = category;
     this.spawnedAtSeconds = spawnedAtSeconds;
+    this.chaosMultiplier = chaosMultiplier;
     this.sprite = scene.add.image(x, y, getBookTextureKey(category));
     this.sprite.setDepth(4);
     this.sprite.setAngle(Phaser.Math.Between(-18, 18));
